@@ -1,8 +1,11 @@
 import os
-from flask import Flask, session, request, redirect
+from flask import Flask, session, request, redirect, jsonify
 from flask_session import Session
 import spotipy
 import uuid
+from urllib.parse import unquote
+from collections import namedtuple
+import dateutil.parser
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.urandom(64)
@@ -14,8 +17,10 @@ caches_folder = './.spotify_caches/'
 if not os.path.exists(caches_folder):
     os.makedirs(caches_folder)
 
+
 def session_cache_path():
     return caches_folder + session.get('uuid')
+
 
 @app.route('/')
 def index():
@@ -24,7 +29,7 @@ def index():
         session['uuid'] = str(uuid.uuid4())
 
     cache_handler = spotipy.cache_handler.CacheFileHandler(cache_path=session_cache_path())
-    auth_manager = spotipy.oauth2.SpotifyOAuth(scope='user-read-currently-playing playlist-modify-private',
+    auth_manager = spotipy.oauth2.SpotifyOAuth(scope='user-read-currently-playing playlist-modify-private playlist-modify-public',
                                                 cache_handler=cache_handler, 
                                                 show_dialog=True)
 
@@ -59,6 +64,7 @@ def sign_out():
 
 
 @app.route('/playlists')
+@jsonify()
 def playlists():
     cache_handler = spotipy.cache_handler.CacheFileHandler(cache_path=session_cache_path())
     auth_manager = spotipy.oauth2.SpotifyOAuth(cache_handler=cache_handler)
@@ -66,20 +72,36 @@ def playlists():
         return redirect('/')
 
     spotify = spotipy.Spotify(auth_manager=auth_manager)
-    return spotify.current_user_playlists()
+    playlists = spotify.current_user_playlists(limit=199)['items']
+    playlist_name_id = {unquote(x['name']): x['id'] for x in playlists}
+    return playlist_name_id
 
 
-@app.route('/currently_playing')
-def currently_playing():
+@app.route('/playlist/restrict')
+def remove_n_songs(playlist_id, n=20):
+    Song = namedtuple('Song', ['id', 'added_at', 'added_by'])
     cache_handler = spotipy.cache_handler.CacheFileHandler(cache_path=session_cache_path())
     auth_manager = spotipy.oauth2.SpotifyOAuth(cache_handler=cache_handler)
-    if not auth_manager.validate_token(cache_handler.get_cached_token()):
-        return redirect('/')
-    spotify = spotipy.Spotify(auth_manager=auth_manager)
-    track = spotify.current_user_playing_track()
-    if not track is None:
-        return track
-    return "No track currently playing."
+    songs = []
+    sp = spotipy.Spotify(auth_manager=auth_manager)
+    response = sp.playlist_items(playlist_id,
+                                 offset=0,
+                                 fields='items.added_at,items.id,added_by',
+                                )
+    for item in response['tracks']['items']:
+        songs.append(Song(id=item['id'], added_at=dateutil.parser.parse(item['added_at']), added_by=item['added_by']))
+
+    if len(songs) < n:
+        return {'Nothing to remove'}
+
+    songs_sorted = sorted(songs, key=Song.added_at)
+
+    songs_to_delete = [x.id for x in songs_sorted[::-n]]
+
+    results = sp.playlist_remove_all_occurrences_of_items(
+        playlist_id, songs_to_delete)
+
+    return results
 
 
 @app.route('/current_user')
@@ -92,11 +114,8 @@ def current_user():
     return spotify.current_user()
 
 
-'''
-Following lines allow application to be run more conveniently with
-`python app.py` (Make sure you're using python3)
-(Also includes directive to leverage pythons threading capacity.)
-'''
 if __name__ == '__main__':
-    app.run(threaded=True, port=int(os.environ.get("PORT",
-                                                   os.environ.get("SPOTIPY_REDIRECT_URI", 8080).split(":")[-1])))
+    app.run(
+        threaded=True,
+        port=int(os.environ.get("PORT",
+            os.environ.get("SPOTIPY_REDIRECT_URI", 8080).split(":")[-1])))
