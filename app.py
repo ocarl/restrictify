@@ -72,7 +72,14 @@ def playlists():
         return redirect('/')
 
     spotify = spotipy.Spotify(auth_manager=auth_manager)
-    playlists = spotify.current_user_playlists(limit=199)['items']
+    playlists = []
+    r = spotify.current_user_playlists(limit=50)
+    playlists.append(r['items'])
+
+    while r['next']:
+        r = spotify.current_user_playlists(offset=50, limit=50)
+        playlists.append(r['items'])
+
     playlist_name_id = {unquote(x['name']): x['id'] for x in playlists}
     return playlist_name_id
 
@@ -87,7 +94,7 @@ def remove_n_songs(playlist_id, n=20):
     response = sp.playlist_items(playlist_id,
                                  offset=0,
                                  fields='items.added_at,items.id,added_by',
-                                )
+                                 )
     for item in response['tracks']['items']:
         songs.append(Song(id=item['id'], added_at=dateutil.parser.parse(item['added_at']), added_by=item['added_by']))
 
