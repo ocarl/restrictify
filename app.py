@@ -1,11 +1,12 @@
 import os
-from flask import Flask, session, request, redirect, jsonify
+from flask import Flask, session, request, redirect, render_template
 from flask_session import Session
 import spotipy
 import uuid
 from urllib.parse import unquote
 from collections import namedtuple
 import dateutil.parser
+
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.urandom(64)
@@ -29,9 +30,11 @@ def index():
         session['uuid'] = str(uuid.uuid4())
 
     cache_handler = spotipy.cache_handler.CacheFileHandler(cache_path=session_cache_path())
-    auth_manager = spotipy.oauth2.SpotifyOAuth(scope='user-read-currently-playing playlist-modify-private playlist-modify-public',
-                                                cache_handler=cache_handler, 
-                                                show_dialog=True)
+    auth_manager = spotipy.oauth2.SpotifyOAuth(
+        scope='user-read-currently-playing playlist-modify-private playlist-modify-public playlist-read-collaborative',
+        cache_handler=cache_handler,
+        show_dialog=True
+    )
 
     if request.args.get("code"):
         # Step 3. Being redirected from Spotify auth page
@@ -49,7 +52,8 @@ def index():
            f'<small><a href="/sign_out">[sign out]<a/></small></h2>' \
            f'<a href="/playlists">my playlists</a> | ' \
            f'<a href="/currently_playing">currently playing</a> | ' \
-		   f'<a href="/current_user">me</a>' \
+           f'<a href="/current_user">me</a>' \
+
 
 
 @app.route('/sign_out')
@@ -59,12 +63,11 @@ def sign_out():
         os.remove(session_cache_path())
         session.clear()
     except OSError as e:
-        print ("Error: %s - %s." % (e.filename, e.strerror))
+        print("Error: %s - %s." % (e.filename, e.strerror))
     return redirect('/')
 
 
 @app.route('/playlists')
-@jsonify()
 def playlists():
     cache_handler = spotipy.cache_handler.CacheFileHandler(cache_path=session_cache_path())
     auth_manager = spotipy.oauth2.SpotifyOAuth(cache_handler=cache_handler)
@@ -74,18 +77,22 @@ def playlists():
     spotify = spotipy.Spotify(auth_manager=auth_manager)
     playlists = []
     r = spotify.current_user_playlists(limit=50)
-    playlists.append(r['items'])
-
+    playlists.extend(r['items'])
+    offset = 50
     while r['next']:
-        r = spotify.current_user_playlists(offset=50, limit=50)
-        playlists.append(r['items'])
+        r = spotify.current_user_playlists(offset=offset, limit=50)
+        playlists.extend(r['items'])
+        offset += 50
 
     playlist_name_id = {unquote(x['name']): x['id'] for x in playlists}
-    return playlist_name_id
+
+    return render_template('list_elements.html', data=playlist_name_id.items(), n=5)
 
 
 @app.route('/playlist/restrict')
-def remove_n_songs(playlist_id, n=20):
+def remove_n_songs():
+    playlist_id = request.args['playlist_id']
+    n = int(request.args.get('n', 20))
     Song = namedtuple('Song', ['id', 'added_at', 'added_by'])
     cache_handler = spotipy.cache_handler.CacheFileHandler(cache_path=session_cache_path())
     auth_manager = spotipy.oauth2.SpotifyOAuth(cache_handler=cache_handler)
@@ -93,22 +100,29 @@ def remove_n_songs(playlist_id, n=20):
     sp = spotipy.Spotify(auth_manager=auth_manager)
     response = sp.playlist_items(playlist_id,
                                  offset=0,
-                                 fields='items.added_at,items.id,added_by',
+                                 fields='items.added_at,items.track.id,items.added_by',
+                                 additional_types=['track'],
                                  )
-    for item in response['tracks']['items']:
-        songs.append(Song(id=item['id'], added_at=dateutil.parser.parse(item['added_at']), added_by=item['added_by']))
+    print(response)
+
+    for item in response['items']:
+        songs.append(Song(
+            id=item['track']['id'],
+            added_at=dateutil.parser.parse(item['added_at']),
+            added_by=item['added_by']
+        ))
 
     if len(songs) < n:
         return {'Nothing to remove'}
 
-    songs_sorted = sorted(songs, key=Song.added_at)
+    songs_sorted = sorted(songs, key=lambda x: x.added_at)
 
-    songs_to_delete = [x.id for x in songs_sorted[::-n]]
+    songs_to_delete = [x.id for x in songs_sorted[:-n]]
 
     results = sp.playlist_remove_all_occurrences_of_items(
         playlist_id, songs_to_delete)
 
-    return results
+    return {'deleted': songs_to_delete}
 
 
 @app.route('/current_user')
